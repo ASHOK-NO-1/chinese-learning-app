@@ -1,7 +1,7 @@
 // Service worker: lets the app open offline and be installed on phone / PC.
 // Strategy: network first (so you always get the newest version when online), cache as offline fallback.
 // Stroke-order library + data from jsDelivr: cache first (versioned files never change), kept across app updates.
-const CACHE = "xue-v7";
+const CACHE = "xue-v8";
 const CDN_CACHE = "xue-cdn";
 const SHELL = [
   "./", "index.html", "manifest.webmanifest", "css/app.css", "css/pinyin.css", "css/listener.css", "css/features.css",

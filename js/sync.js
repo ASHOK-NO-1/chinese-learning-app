@@ -68,7 +68,19 @@ export async function signOut() {
   await fb.auth.signOut(fb.authI);
 }
 
-export async function syncNow() { await uploadNow(); }
+// ---- safety net: protect the free daily quota (20,000 writes / 50,000 reads) ----
+const MIN_GAP_MS = 3000;            // at most one upload every 3 seconds
+const MAX_AUTO_UPLOADS = 12;        // ... and at most 12 automatic uploads per 10 minutes
+const WINDOW_MS = 10 * 60 * 1000;
+let uploadTimes = [];
+let paused = "";                    // reason sync is paused ("" = running)
+let lastUploadAt = 0;
+
+export async function syncNow() {
+  paused = "";                      // pressing "Sync now" always tries again
+  uploadTimes = [];
+  await uploadNow(true);
+}
 
 function start() {
   stop();
@@ -81,7 +93,10 @@ function start() {
     const localNewer = store.applySyncState(remote);
     if (localNewer) scheduleUpload(0);
     else setStatus("synced", { at: new Date(), error: "" });
-  }, (e) => setStatus("error", { error: friendly(e) }));
+  }, (e) => {
+    if (e?.code === "resource-exhausted") paused = friendly(e);
+    setStatus("error", { error: friendly(e) });
+  });
   offStore = store.onChange((what, meta) => { if (what === "words" && !meta.fromSync) scheduleUpload(); });
 }
 
@@ -92,26 +107,44 @@ function stop() {
 }
 
 function scheduleUpload(delay = 900) {
+  if (paused) return;
   clearTimeout(uploadTimer);
   setStatus("syncing");
-  uploadTimer = setTimeout(uploadNow, delay);
+  const wait = Math.max(delay, lastUploadAt + MIN_GAP_MS - Date.now());
+  uploadTimer = setTimeout(() => uploadNow(false), wait);
 }
 
-async function uploadNow() {
+async function uploadNow(manual = false) {
   clearTimeout(uploadTimer);
-  if (!fb || !user) return;
+  if (!fb || !user || (paused && !manual)) return;
+  const now = Date.now();
+  uploadTimes = uploadTimes.filter((t) => now - t < WINDOW_MS);
+  if (!manual && uploadTimes.length >= MAX_AUTO_UPLOADS) {
+    paused = "Sync paused to protect the free daily limit (too many uploads in a short time). Your words are safe on this device — press Sync now to try again.";
+    setStatus("error", { error: paused });
+    return;
+  }
   const { fs, db } = fb;
   try {
     const ref = fs.doc(db, "users", user.uid);
+    let wrote = false;
     // read-merge-write in one transaction, so two devices saving at the same moment can't overwrite each other
     await fs.runTransaction(db, async (tx) => {
+      wrote = false;
       const snap = await tx.get(ref);
-      const merged = store.mergeStates(store.exportSyncState(), snap.exists() ? snap.data().state : null);
+      const remote = snap.exists() ? snap.data().state : null;
+      const merged = store.mergeStates(store.exportSyncState(), remote);
+      // nothing new for the cloud? then don't write at all (saves quota)
+      if (remote && store.canonical(merged) === store.canonical(store.mergeStates(remote, {}))) return;
       // JSON round-trip drops `undefined` values, which Firestore refuses
       tx.set(ref, { app: "xue-learn-chinese", state: JSON.parse(JSON.stringify(merged)), updatedAt: fs.serverTimestamp() });
+      wrote = true;
     });
+    lastUploadAt = Date.now();
+    if (wrote) uploadTimes.push(lastUploadAt);
     setStatus("synced", { at: new Date(), error: "" });
   } catch (e) {
+    if (e?.code === "resource-exhausted") paused = friendly(e);   // don't keep retrying against the limit
     setStatus("error", { error: friendly(e) });
   }
 }
@@ -120,6 +153,7 @@ function friendly(e) {
   const code = e?.code || "";
   if (code === "auth/unauthorized-domain") return "This web address isn't allowed yet: add it under Firebase → Authentication → Settings → Authorized domains.";
   if (code === "auth/network-request-failed" || code === "unavailable") return "No internet connection — changes will sync when you're back online.";
+  if (code === "resource-exhausted") return "Today's free sync limit is used up. It resets automatically within 24 hours (midnight US Pacific time). Your words are safe on this device and will sync after that.";
   if (code === "permission-denied") return "The database refused access — check the Firestore rules (see README).";
   if (code === "auth/operation-not-allowed") return "Google sign-in isn't switched on in Firebase → Authentication → Sign-in method.";
   return e?.message || String(e);

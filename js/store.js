@@ -202,10 +202,21 @@ export function mergeStates(a, b) {
  * Applies the cloud copy: merges it with what's on this device and saves the result.
  * Returns true when this device has changes the cloud doesn't (so they should be uploaded).
  */
+/**
+ * Text form of a state with every object's keys sorted, so two states compare equal when their
+ * CONTENT is equal. (Firestore returns fields in alphabetical order; comparing raw JSON made every
+ * sync look "changed" and caused an endless upload loop.)
+ */
+export function canonical(v) {
+  const sort = (x) => Array.isArray(x) ? x.map(sort)
+    : x && typeof x === "object" ? Object.fromEntries(Object.keys(x).sort().map((k) => [k, sort(x[k])])) : x;
+  return JSON.stringify(sort(v));
+}
+
 export function applySyncState(remote) {
   const local = exportSyncState();
   const merged = mergeStates(local, remote);
-  const same = (x, y) => JSON.stringify(x) === JSON.stringify(y);
+  const same = (x, y) => canonical(x) === canonical(y);
   if (!same(merged, local)) {
     write(KEY.userWords, merged.userWords);
     write(KEY.deleted, merged.deleted);
